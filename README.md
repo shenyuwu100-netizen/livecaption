@@ -30,7 +30,7 @@
 ## 验证与测试
 
 ```powershell
-# 1. 运行全部 Rust 单元测试（81 项）
+# 1. 运行全部 Rust 单元测试（84 项）
 cargo test --lib --manifest-path src-tauri\Cargo.toml
 
 # 2. 严格 Clippy 静态检查（零告警）
@@ -40,5 +40,5 @@ cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
 npm run build
 ```
 
-- **Rust 单元测试**：**81 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应 VAD 切片、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/TXT 格式化及纪要引用与数字核验）。
+- **Rust 单元测试**：**84 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应 VAD 切片、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/TXT 格式化及一键会后纪要生成与引用/数字核验）。
 - **静态检查**：`cargo clippy --all-targets -- -D warnings` 零告警，`tsc && vite build` 零错误。
