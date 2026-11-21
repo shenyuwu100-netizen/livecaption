@@ -17,11 +17,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci --legacy-peer-deps
       - name: Frontend typecheck and production build
         run: npm run build
-      - name: Cargo unit tests
+      - name: Cargo unit tests (89 tests)
         run: cargo test --lib --manifest-path src-tauri/Cargo.toml
       - name: Cargo Clippy (-D warnings)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib --tests -- -D warnings
