@@ -26,6 +26,8 @@ type CaptionStatus = {
   captionCount: number;
   gapCount: number;
   avgDecodeMs: number;
+  p50DecodeMs: number;
+  p95DecodeMs: number;
   lastDecodeMs: number;
   message: string;
 };
@@ -45,6 +47,7 @@ type SummaryVerification = {
   citedIds: number[];
   missingCitationIds: number[];
   unsupportedNumbers: string[];
+  uncitedLines: string[];
 };
 
 type GeneratedSummary = {
@@ -64,6 +67,7 @@ export default function App() {
   const [sources, setSources] = useState<Source[]>([]);
   const [source, setSource] = useState("");
   const [exportPath, setExportPath] = useState("D:\\CodexArtifacts\\livecaption-session.srt");
+  const [searchQuery, setSearchQuery] = useState("");
   const [llmBaseUrl, setLlmBaseUrl] = useState("");
   const [llmModel, setLlmModel] = useState("gpt-4o-mini");
   const [summaryDraft, setSummaryDraft] = useState("");
@@ -236,8 +240,9 @@ export default function App() {
           </button>
         </div>
         <p className="hint" role="status">
-          {audio?.message || "就绪"} · 版本号 rev={sync?.revision ?? 0} · 平均识别耗时{" "}
-          {captionStatus?.avgDecodeMs ?? 0} ms（最近一段 {captionStatus?.lastDecodeMs ?? 0} ms）
+          {audio?.message || "就绪"} · 版本号 rev={sync?.revision ?? 0} · 识别延迟 P50={" "}
+          {captionStatus?.p50DecodeMs ?? 0} ms / P95={captionStatus?.p95DecodeMs ?? 0} ms（平均{" "}
+          {captionStatus?.avgDecodeMs ?? 0} ms） · 跨端阅读页：{sync?.endpoint || "http://127.0.0.1:8788/captions"}
         </p>
       </section>
 
@@ -250,9 +255,15 @@ export default function App() {
               onClick={() =>
                 void act(
                   async () => {
+                    const lower = exportPath.toLowerCase();
+                    const fmt = lower.endsWith(".txt")
+                      ? "txt"
+                      : lower.endsWith(".vtt")
+                        ? "vtt"
+                        : "srt";
                     const msg = await invoke<string>("export_captions", {
                       path: exportPath,
-                      format: exportPath.endsWith(".txt") ? "txt" : "srt",
+                      format: fmt,
                     });
                     setNotice(msg);
                   },
@@ -260,7 +271,7 @@ export default function App() {
                 )
               }
             >
-              导出 .SRT / .TXT
+              导出 .SRT / .VTT / .TXT
             </button>
             <button
               disabled={busy || captions.length === 0}
@@ -270,22 +281,42 @@ export default function App() {
             </button>
           </div>
         </div>
-        <label>
-          导出文件路径（后缀 .srt 导出标准 SubRip 字幕，.txt 导出带时间戳逐字稿）
-          <input value={exportPath} onChange={(e) => setExportPath(e.target.value)} />
-        </label>
+        <div className="grid-two">
+          <label>
+            导出路径（支持 .srt SubRip、.vtt WebVTT、.txt 时间戳逐字稿）
+            <input value={exportPath} onChange={(e) => setExportPath(e.target.value)} />
+          </label>
+          <label>
+            字幕检索（按关键词、时间或 #序号 过滤）
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="输入关键词或 #1 实时过滤..."
+            />
+          </label>
+        </div>
         <div className="caption-feed" role="log" aria-live="polite">
           {captions.length === 0 ? (
             <p className="hint">暂无字幕片段。开始播放音频并点击“开始实时字幕”后将在此处实时滚动显示。</p>
           ) : (
-            captions.map((item) => (
-              <div key={item.id} className="caption-row">
-                <span className="caption-meta">
-                  [#{item.id} · {item.timestamp} · {item.decodeMs} ms]
-                </span>
-                <span className="caption-text">{item.text}</span>
-              </div>
-            ))
+            captions
+              .filter((item) => {
+                const q = searchQuery.trim().toLowerCase();
+                if (!q) return true;
+                return (
+                  item.text.toLowerCase().includes(q) ||
+                  item.timestamp.toLowerCase().includes(q) ||
+                  `#${item.id}` === q
+                );
+              })
+              .map((item) => (
+                <div key={item.id} className="caption-row">
+                  <span className="caption-meta">
+                    [#{item.id} · {item.timestamp} · {item.decodeMs} ms]
+                  </span>
+                  <span className="caption-text">{item.text}</span>
+                </div>
+              ))
           )}
         </div>
       </section>
@@ -360,6 +391,9 @@ export default function App() {
             )}
             {verification.unsupportedNumbers.length > 0 && (
               <div>原文字幕未出现的数字：{verification.unsupportedNumbers.join(", ")}</div>
+            )}
+            {verification.uncitedLines && verification.uncitedLines.length > 0 && (
+              <div>缺少 [#序号] 引用的句子：{verification.uncitedLines.join(" ； ")}</div>
             )}
           </div>
         )}

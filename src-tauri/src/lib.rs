@@ -18,6 +18,7 @@ pub mod launch;
 pub mod platform;
 pub mod relay_socket;
 pub mod sync;
+pub mod web_viewer;
 
 fn default_audio_language() -> String {
     "zh".into()
@@ -167,8 +168,12 @@ fn get_caption_status(state: State<'_, AppState>) -> caption::PublicStatus {
 }
 
 #[tauri::command]
-fn get_captions(state: State<'_, AppState>) -> Vec<caption::CaptionItem> {
-    caption::list_items(&state)
+fn get_captions(state: State<'_, AppState>, query: Option<String>) -> Vec<caption::CaptionItem> {
+    let items = caption::list_items(&state);
+    match query {
+        Some(q) if !q.trim().is_empty() => caption::search_captions(&items, &q),
+        _ => items,
+    }
 }
 
 #[tauri::command]
@@ -251,6 +256,7 @@ pub fn run() {
             let state = app.state::<AppState>();
             load_local_state(app.handle(), &state);
             let _ = caption::initialize(app.handle(), &state);
+            web_viewer::spawn_local_viewer(app.handle().clone());
 
             if mode.create_tray() {
                 let show = tauri::menu::MenuItem::with_id(

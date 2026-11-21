@@ -39,6 +39,8 @@ pub struct PublicStatus {
     pub caption_count: u64,
     pub gap_count: u64,
     pub avg_decode_ms: u64,
+    pub p50_decode_ms: u64,
+    pub p95_decode_ms: u64,
     pub last_decode_ms: u64,
     pub message: String,
 }
@@ -50,6 +52,7 @@ pub struct SummaryVerification {
     pub cited_ids: Vec<u64>,
     pub missing_citation_ids: Vec<u64>,
     pub unsupported_numbers: Vec<String>,
+    pub uncited_lines: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -164,6 +167,61 @@ pub fn format_txt(items: &[CaptionItem]) -> String {
     out
 }
 
+pub fn format_vtt_timestamp(offset_ms: u64) -> String {
+    let millis = offset_ms % 1000;
+    let total_secs = offset_ms / 1000;
+    let secs = total_secs % 60;
+    let total_mins = total_secs / 60;
+    let mins = total_mins % 60;
+    let hours = total_mins / 60;
+    format!("{hours:02}:{mins:02}:{secs:02}.{millis:03}")
+}
+
+pub fn format_vtt(items: &[CaptionItem], base_ms: u64) -> String {
+    let mut out = String::from("WEBVTT\n\n");
+    for item in items {
+        let start = item.start_ms.saturating_sub(base_ms);
+        let end = item.end_ms.max(item.start_ms + 800).saturating_sub(base_ms);
+        out.push_str(&format!(
+            "cue-{}\n{} --> {}\n{}\n\n",
+            item.id,
+            format_vtt_timestamp(start),
+            format_vtt_timestamp(end),
+            item.text.trim()
+        ));
+    }
+    out
+}
+
+pub fn latency_percentiles(items: &[CaptionItem]) -> (u64, u64) {
+    if items.is_empty() {
+        return (0, 0);
+    }
+    let mut latencies: Vec<u64> = items.iter().map(|i| i.decode_ms).collect();
+    latencies.sort_unstable();
+    let n = latencies.len();
+    let p50 = latencies[(n - 1) / 2];
+    let p95_idx = ((n as f64 * 0.95).ceil() as usize).saturating_sub(1).min(n - 1);
+    let p95 = latencies[p95_idx];
+    (p50, p95)
+}
+
+pub fn search_captions(items: &[CaptionItem], query: &str) -> Vec<CaptionItem> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return items.to_vec();
+    }
+    items
+        .iter()
+        .filter(|item| {
+            item.text.to_lowercase().contains(&q)
+                || item.timestamp.to_lowercase().contains(&q)
+                || format!("#{}", item.id) == q
+        })
+        .cloned()
+        .collect()
+}
+
 /// Verify that every `[#id]` citation in a post-meeting summary points to a real
 /// caption segment and that every numeric claim appears verbatim in the cited segments.
 pub fn verify_summary(summary: &str, items: &[CaptionItem]) -> SummaryVerification {
@@ -203,13 +261,24 @@ pub fn verify_summary(summary: &str, items: &[CaptionItem]) -> SummaryVerificati
         }
     }
 
-    let valid =
-        !cited_ids.is_empty() && missing_citation_ids.is_empty() && unsupported_numbers.is_empty();
+    let mut uncited_lines = Vec::new();
+    for line in summary.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !cite_re.is_match(trimmed) {
+            uncited_lines.push(trimmed.to_string());
+        }
+    }
+
+    let valid = !cited_ids.is_empty()
+        && missing_citation_ids.is_empty()
+        && unsupported_numbers.is_empty()
+        && uncited_lines.is_empty();
     SummaryVerification {
         valid,
         cited_ids,
         missing_citation_ids,
         unsupported_numbers,
+        uncited_lines,
     }
 }
 
@@ -238,12 +307,15 @@ pub fn initialize(app: &AppHandle, state: &AppState) -> Result<PublicStatus, Str
 fn snapshot_from(rt: &Runtime) -> PublicStatus {
     let count = rt.items.len() as u64;
     let avg = rt.total_decode_ms.checked_div(count).unwrap_or(0);
+    let (p50, p95) = latency_percentiles(&rt.items);
     PublicStatus {
         recording: rt.recording,
         session_id: rt.session_id.clone(),
         caption_count: count,
         gap_count: rt.gaps.len() as u64,
         avg_decode_ms: avg,
+        p50_decode_ms: p50,
+        p95_decode_ms: p95,
         last_decode_ms: rt.last_decode_ms,
         message: rt.message.clone(),
     }
@@ -350,8 +422,9 @@ pub fn export_to_path(state: &AppState, path: &str, format: &str) -> Result<Stri
     }
     let content = match format {
         "srt" => format_srt(&items, base_ms),
+        "vtt" => format_vtt(&items, base_ms),
         "txt" => format_txt(&items),
-        _ => return Err("不支持的导出格式（仅支持 srt 或 txt）".into()),
+        _ => return Err("不支持的导出格式（仅支持 srt、vtt 或 txt）".into()),
     };
     let target = PathBuf::from(path);
     if let Some(parent) = target.parent() {
@@ -541,5 +614,34 @@ mod tests {
         assert!(res.verification.valid);
         assert_eq!(res.verification.cited_ids, vec![1, 2]);
         assert!(res.verification.unsupported_numbers.is_empty());
+    }
+
+    #[test]
+    fn vtt_exporter_formats_standard_webvtt_cues() {
+        let items = sample_captions();
+        let vtt = format_vtt(&items, 1_000);
+        assert!(vtt.starts_with("WEBVTT\n\n"));
+        assert!(vtt.contains("cue-1\n00:00:00.000 --> 00:00:03.500\n本季度线上无障碍字幕覆盖率提升至 96.4%"));
+        assert!(vtt.contains("cue-2\n00:00:04.000 --> 00:00:07.200\n下周二完成 3 场跨语种讲座字幕测试。"));
+    }
+
+    #[test]
+    fn latency_percentiles_and_keyword_search_work_accurately() {
+        let items = sample_captions();
+        let (p50, p95) = latency_percentiles(&items);
+        assert_eq!(p50, 1650);
+        assert_eq!(p95, 1780);
+        assert_eq!(search_captions(&items, "96.4%").len(), 1);
+        assert_eq!(search_captions(&items, "#2")[0].id, 2);
+        assert_eq!(search_captions(&items, "").len(), 2);
+    }
+
+    #[test]
+    fn summary_verifier_rejects_uncited_lines() {
+        let items = sample_captions();
+        let summary = "- 字幕覆盖率已达 96.4% [#1]\n- 这一条忘记标注任何引用来源";
+        let res = verify_summary(summary, &items);
+        assert!(!res.valid);
+        assert_eq!(res.uncited_lines, vec!["- 这一条忘记标注任何引用来源"]);
     }
 }
