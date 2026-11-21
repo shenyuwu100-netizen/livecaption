@@ -207,8 +207,11 @@ mod tests {
             let encoded = encode_audio(&pcm, language).unwrap();
             assert_eq!(&encoded[..5], &[byte, 3, 0, 0, 0]);
             let decoded: Vec<i16> = encoded[5..]
-                .chunks_exact(2)
-                .map(|value| i16::from_le_bytes([value[0], value[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .copied()
+                .map(i16::from_le_bytes)
                 .collect();
             assert_eq!(decoded, pcm);
         }

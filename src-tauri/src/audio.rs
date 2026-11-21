@@ -687,8 +687,11 @@ fn capture(
                 return Err(String::from_utf8_lossy(&data).chars().take(180).collect())
             }
             _ => data
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .copied()
+                .map(i16::from_le_bytes)
                 .collect::<Vec<_>>(),
         };
         if segmenter.last_voice.is_none() {
