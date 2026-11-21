@@ -21,7 +21,7 @@ jobs:
         with:
           workspaces: "src-tauri -> target"
       - name: Install frontend dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm install
       - name: Frontend typecheck and production build
         run: npm run build
       - name: Cargo unit tests (89 tests)
