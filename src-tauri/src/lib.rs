@@ -195,6 +195,25 @@ fn verify_meeting_summary(
 }
 
 #[tauri::command]
+async fn generate_meeting_summary(
+    state: State<'_, AppState>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+) -> Result<caption::GeneratedSummary, String> {
+    let items = caption::list_items(&state);
+    let client = state.client.clone();
+    caption::generate_and_verify(
+        &client,
+        &items,
+        base_url.as_deref(),
+        api_key.as_deref(),
+        model.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
 fn hide_control(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         window.hide().map_err(|e| format!("无法隐藏窗口: {e}"))?;
@@ -309,6 +328,7 @@ pub fn run() {
             clear_captions,
             export_captions,
             verify_meeting_summary,
+            generate_meeting_summary,
             hide_control,
             quit_app,
         ])

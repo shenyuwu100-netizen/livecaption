@@ -47,6 +47,12 @@ type SummaryVerification = {
   unsupportedNumbers: string[];
 };
 
+type GeneratedSummary = {
+  summary: string;
+  mode: string;
+  verification: SummaryVerification;
+};
+
 type Source = { id: string; name: string };
 
 export default function App() {
@@ -58,6 +64,8 @@ export default function App() {
   const [sources, setSources] = useState<Source[]>([]);
   const [source, setSource] = useState("");
   const [exportPath, setExportPath] = useState("D:\\CodexArtifacts\\livecaption-session.srt");
+  const [llmBaseUrl, setLlmBaseUrl] = useState("");
+  const [llmModel, setLlmModel] = useState("gpt-4o-mini");
   const [summaryDraft, setSummaryDraft] = useState("");
   const [verification, setVerification] = useState<SummaryVerification | null>(null);
   const [consentChecked, setConsentChecked] = useState(true);
@@ -283,10 +291,28 @@ export default function App() {
       </section>
 
       <details className="panel">
-        <summary>会后纪要引用与数字事实校验（防幻觉核验）</summary>
+        <summary>会后纪要生成与引用/数字事实校验</summary>
         <p className="hint">
-          输入带 <code>[#序号]</code> 引用的会后纪要草稿，校验每条引用是否对应真实字幕，以及所有数字/百分比是否在原文字幕中有据可查。
+          支持一键根据当前字幕生成带 <code>[#序号]</code> 时间戳引用的纪要（未填 Base URL 时使用本机抽取式纪要兜底），并自动校验每条引用与所有数字是否在原文字幕中有据可查。
         </p>
+        <div className="grid-two">
+          <label>
+            OpenAI 兼容接口 Base URL（可选，留空走本地抽取）
+            <input
+              value={llmBaseUrl}
+              onChange={(e) => setLlmBaseUrl(e.target.value)}
+              placeholder="例如 https://api.openai.com/v1 或 http://127.0.0.1:11434/v1"
+            />
+          </label>
+          <label>
+            模型名称（可选）
+            <input
+              value={llmModel}
+              onChange={(e) => setLlmModel(e.target.value)}
+              placeholder="gpt-4o-mini"
+            />
+          </label>
+        </div>
         <textarea
           className="context-box"
           value={summaryDraft}
@@ -294,6 +320,23 @@ export default function App() {
           placeholder="示例：本季度字幕覆盖率达 96.4% [#1]，下周完成 3 场讲座测试 [#2]。"
         />
         <div className="actions">
+          <button
+            className="primary"
+            disabled={busy || captions.length === 0}
+            onClick={() =>
+              void act(async () => {
+                const res = await invoke<GeneratedSummary>("generate_meeting_summary", {
+                  baseUrl: llmBaseUrl.trim() || null,
+                  apiKey: null,
+                  model: llmModel.trim() || null,
+                });
+                setSummaryDraft(res.summary);
+                setVerification(res.verification);
+              }, "已生成会后纪要并完成引用与数字核验")
+            }
+          >
+            一键生成并校验纪要
+          </button>
           <button
             disabled={busy || !summaryDraft.trim()}
             onClick={() =>
@@ -305,7 +348,7 @@ export default function App() {
               }, "已完成纪要引用与事实核验")
             }
           >
-            校验纪要引用与数字
+            仅校验当前草稿
           </button>
         </div>
         {verification && (
