@@ -295,6 +295,61 @@ pub fn retrieve_grounded_context(items: &[CaptionItem], query: &str, max_items: 
     selected.into_iter().take(max_items).collect()
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptComparison {
+    pub status: &'static str,
+    pub difference_kinds: Vec<&'static str>,
+}
+
+/// Compare two ASR transcripts (e.g. primary vs. secondary/re-decoded) and classify
+/// whether any discrepancy touches critical numbers, technical identifiers, or wording.
+pub fn compare_transcripts(primary: &str, secondary: &str) -> TranscriptComparison {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let a = norm(primary);
+    let b = norm(secondary);
+    if a.is_empty() || b.is_empty() {
+        return TranscriptComparison {
+            status: "unavailable",
+            difference_kinds: Vec::new(),
+        };
+    }
+    if a == b {
+        return TranscriptComparison {
+            status: "similar",
+            difference_kinds: Vec::new(),
+        };
+    }
+    let num_re = Regex::new(r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)%?").expect("valid number regex");
+    let id_re = Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("valid identifier regex");
+
+    let nums = |s: &str| {
+        num_re
+            .find_iter(s)
+            .map(|m| m.as_str().to_string())
+            .collect::<Vec<_>>()
+    };
+    let ids = |s: &str| {
+        id_re
+            .find_iter(s)
+            .map(|m| m.as_str().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let mut kinds = Vec::new();
+    if nums(&a) != nums(&b) {
+        kinds.push("number");
+    }
+    if ids(&a) != ids(&b) {
+        kinds.push("identifier");
+    }
+    kinds.push("wording");
+    TranscriptComparison {
+        status: "different",
+        difference_kinds: kinds,
+    }
+}
+
 /// Verify that every `[#id]` citation in a post-meeting summary points to a real
 /// caption segment and that every numeric claim appears verbatim in the cited segments.
 pub fn verify_summary(summary: &str, items: &[CaptionItem]) -> SummaryVerification {
@@ -753,5 +808,19 @@ mod tests {
         });
         let ctx = retrieve_grounded_context(&items, "3 场", 4);
         assert_eq!(ctx.iter().map(|i| i.id).collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn transcript_comparator_detects_number_and_identifier_discrepancies() {
+        assert_eq!(
+            compare_transcripts("延迟 259 ms，使用 WASAPI", "延迟  259 ms，使用 WASAPI").status,
+            "similar"
+        );
+        let diff_num = compare_transcripts("覆盖率 96.4%，使用 WASAPI", "覆盖率 91.4%，使用 WASAPI");
+        assert_eq!(diff_num.status, "different");
+        assert_eq!(diff_num.difference_kinds, vec!["number", "wording"]);
+
+        let diff_id = compare_transcripts("调用 MoveFileExW 接口", "调用 ReplaceFileW 接口");
+        assert_eq!(diff_id.difference_kinds, vec!["identifier", "wording"]);
     }
 }
