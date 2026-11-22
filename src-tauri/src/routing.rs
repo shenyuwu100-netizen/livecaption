@@ -2,7 +2,7 @@
 use super::{extract_stream_text, validate_base_url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 pub const GATEWAY_PRIORITY: [&str; 6] = [
     "newapi-local",
@@ -177,6 +177,44 @@ pub struct SseDecoder {
     pub finished: bool,
 }
 
+/// Three-stage streaming timeout budget (TTFT first-token, inter-token idle, and total deadline).
+/// SSE keepalive comment frames (`: keepalive`) never reset the first-token or idle timers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamBudget {
+    pub first_token: Duration,
+    pub stream_idle: Duration,
+    pub total_deadline: Duration,
+}
+
+pub fn model_stream_budget(model: &str, deep: bool) -> StreamBudget {
+    let first_secs = if deep {
+        15
+    } else if model.contains("mini") || model.contains("haiku") || model.contains("luna") {
+        7
+    } else if model.contains("terra") || model.contains("reasoner") {
+        12
+    } else {
+        8
+    };
+    StreamBudget {
+        first_token: Duration::from_secs(first_secs),
+        stream_idle: Duration::from_secs(if deep { 15 } else { 8 }),
+        total_deadline: Duration::from_secs(if deep { 60 } else { 35 }),
+    }
+}
+
+pub fn quota_retry_seconds(body: &Value) -> Option<u64> {
+    body.get("retryAfterSeconds")
+        .or_else(|| body.get("retry_after"))
+        .or_else(|| body.pointer("/error/retry_after"))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_f64().map(|f| f.ceil().max(1.0) as u64))
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        })
+        .map(|s| s.clamp(1, 3600))
+}
+
 impl SseDecoder {
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>, String> {
         self.pending.extend_from_slice(bytes);
@@ -303,5 +341,29 @@ mod tests {
         for reason in ["length", "content_filter", "tool_calls"] {
             assert!(validate_finish(&json!({"choices":[{"finish_reason":reason}]})).is_err());
         }
+    }
+
+    #[test]
+    fn stream_budgets_assign_differentiated_ttft_and_keepalive_never_emits_content_delta() {
+        let fast = model_stream_budget("gpt-4o-mini", false);
+        let heavy = model_stream_budget("gpt-5.6-terra", false);
+        let deep = model_stream_budget("gpt-4o", true);
+        assert_eq!(fast.first_token, Duration::from_secs(7));
+        assert_eq!(heavy.first_token, Duration::from_secs(12));
+        assert_eq!(deep.total_deadline, Duration::from_secs(60));
+
+        // SSE keepalive comments must produce zero content deltas so timers are not tricked
+        let mut d = SseDecoder::default();
+        let deltas = d.feed(b": keepalive\n\n").unwrap();
+        assert!(deltas.is_empty());
+        assert!(!d.finished);
+    }
+
+    #[test]
+    fn quota_retry_after_parses_numeric_and_string_bounds() {
+        assert_eq!(quota_retry_seconds(&json!({"retryAfterSeconds": 12})), Some(12));
+        assert_eq!(quota_retry_seconds(&json!({"error": {"retry_after": "45"}})), Some(45));
+        assert_eq!(quota_retry_seconds(&json!({"retry_after": 99999})), Some(3600));
+        assert_eq!(quota_retry_seconds(&json!({})), None);
     }
 }

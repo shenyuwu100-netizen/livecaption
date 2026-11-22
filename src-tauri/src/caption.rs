@@ -222,6 +222,79 @@ pub fn search_captions(items: &[CaptionItem], query: &str) -> Vec<CaptionItem> {
         .collect()
 }
 
+/// Filter common Whisper silence/background-noise hallucinations (e.g. subtitle credit watermarks).
+pub fn is_whisper_hallucination(text: &str) -> bool {
+    let cleaned = text
+        .trim()
+        .trim_matches(|c: char| c.is_ascii_punctuation() || "，。！？、；：（）【】《》“”‘’…—·".contains(c))
+        .trim();
+    if cleaned.is_empty() {
+        return true;
+    }
+    const HALLUCINATIONS: &[&str] = &[
+        "字幕由 Amara.org 社区提供",
+        "字幕由Amara.org社区提供",
+        "Subtitles by the Amara.org community",
+        "谢谢观看",
+        "感谢观看",
+        "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+        "Thank you for watching",
+    ];
+    HALLUCINATIONS
+        .iter()
+        .any(|h| cleaned.eq_ignore_ascii_case(h))
+}
+
+/// Deduplicate boundary overlap when two consecutive VAD segments (`continued == true`) are merged.
+pub fn merge_continued_text(prev: &str, next: &str) -> String {
+    let a = prev.trim_end();
+    let b = next.trim_start();
+    if a.is_empty() {
+        return b.to_string();
+    }
+    if b.is_empty() {
+        return a.to_string();
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let max_overlap = a_chars.len().min(b_chars.len()).min(16);
+    for k in (2..=max_overlap).rev() {
+        if a_chars[a_chars.len() - k..] == b_chars[..k] {
+            let suffix: String = b_chars[k..].iter().collect();
+            return format!("{a}{suffix}");
+        }
+    }
+    format!("{a}{b}")
+}
+
+/// Retrieve relevant caption segments while keeping adjacent qualifier clauses
+/// ("但需核实", "不保证", "仅限") attached to their preceding claim.
+pub fn retrieve_grounded_context(items: &[CaptionItem], query: &str, max_items: usize) -> Vec<CaptionItem> {
+    let matches = search_captions(items, query);
+    if matches.is_empty() || max_items == 0 {
+        return Vec::new();
+    }
+    let mut selected = Vec::new();
+    for m in matches {
+        if !selected.iter().any(|s: &CaptionItem| s.id == m.id) {
+            selected.push(m.clone());
+        }
+        // Attach the immediately following segment if it starts with a qualifying constraint
+        if let Some(next) = items.iter().find(|i| i.id == m.id + 1) {
+            let t = next.text.trim();
+            if (t.starts_with("但") || t.starts_with("不过") || t.starts_with("不保证") || t.starts_with("需核实") || t.starts_with("仅限"))
+                && !selected.iter().any(|s: &CaptionItem| s.id == next.id)
+            {
+                selected.push(next.clone());
+            }
+        }
+        if selected.len() >= max_items {
+            break;
+        }
+    }
+    selected.into_iter().take(max_items).collect()
+}
+
 /// Verify that every `[#id]` citation in a post-meeting summary points to a real
 /// caption segment and that every numeric claim appears verbatim in the cited segments.
 pub fn verify_summary(summary: &str, items: &[CaptionItem]) -> SummaryVerification {
@@ -361,7 +434,7 @@ pub fn record(
     sequence: u64,
 ) -> Result<Option<CaptionItem>, String> {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if is_whisper_hallucination(trimmed) {
         return Ok(None);
     }
     let mut rt = state.caption.lock().map_err(|_| "字幕状态锁异常")?;
@@ -643,5 +716,42 @@ mod tests {
         let res = verify_summary(summary, &items);
         assert!(!res.valid);
         assert_eq!(res.uncited_lines, vec!["- 这一条忘记标注任何引用来源"]);
+    }
+
+    #[test]
+    fn whisper_hallucination_filter_blocks_boilerplate_and_keeps_real_speech() {
+        assert!(is_whisper_hallucination("   "));
+        assert!(is_whisper_hallucination("...，。！"));
+        assert!(is_whisper_hallucination("字幕由 Amara.org 社区提供"));
+        assert!(is_whisper_hallucination("Thank you for watching."));
+        assert!(!is_whisper_hallucination("我们今天讨论 WASAPI 音频采集架构"));
+    }
+
+    #[test]
+    fn continued_segment_merger_removes_boundary_word_overlap() {
+        assert_eq!(
+            merge_continued_text("通过常驻推理进程避免重复", "避免重复加载模型"),
+            "通过常驻推理进程避免重复加载模型"
+        );
+        assert_eq!(
+            merge_continued_text("前半句没有重叠，", "后半句直接拼接"),
+            "前半句没有重叠，后半句直接拼接"
+        );
+    }
+
+    #[test]
+    fn grounded_context_retrieval_keeps_adjacent_qualifier_segment_attached() {
+        let mut items = sample_captions();
+        items.push(CaptionItem {
+            id: 3,
+            start_ms: 8_500,
+            end_ms: 10_200,
+            timestamp: "2026-11-21 20:00:08".into(),
+            text: "但需核实跨语种噪声环境下的远场麦克风表现。".into(),
+            decode_ms: 260,
+            continued: false,
+        });
+        let ctx = retrieve_grounded_context(&items, "3 场", 4);
+        assert_eq!(ctx.iter().map(|i| i.id).collect::<Vec<_>>(), vec![2, 3]);
     }
 }

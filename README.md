@@ -35,7 +35,7 @@
 ## 验证与测试
 
 ```powershell
-# 1. 运行全部 Rust 单元测试（95 项）
+# 1. 运行全部 Rust 单元测试（100 项）
 cargo test --lib --manifest-path src-tauri\Cargo.toml
 
 # 2. 严格 Clippy 静态检查（零告警）
@@ -45,5 +45,5 @@ cargo clippy --manifest-path src-tauri\Cargo.toml --lib --tests -- -D warnings
 npm run build
 ```
 
-- **Rust 单元测试**：**95 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应底噪 VAD 切片、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/VTT/TXT 格式化、P50/P95 延迟分位数与关键词检索、内置 Web 字幕服务 `ETag` `304` 协商、NewAPI 多渠道分级故障转移与任意 UTF-8 字节边界 SSE 解码，以及会后纪要引用/数字核验）。
+- **Rust 单元测试**：**100 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应底噪 VAD 切片、Whisper 静音幻觉过滤与跨段重叠去重、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/VTT/TXT 格式化、P50/P95 延迟分位数与限定词同块检索、内置 Web 字幕服务 `ETag` `304` 协商、NewAPI 多渠道分级故障转移、三阶段流式超时预算与任意 UTF-8 字节边界 SSE 解码，以及会后纪要引用/数字核验）。
 - **静态检查**：`cargo clippy --all-targets -- -D warnings` 零告警，`tsc && vite build` 零错误。
