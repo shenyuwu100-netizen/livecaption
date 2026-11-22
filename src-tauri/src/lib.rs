@@ -17,6 +17,7 @@ pub mod capture_worker;
 pub mod launch;
 pub mod platform;
 pub mod relay_socket;
+pub mod routing;
 pub mod sync;
 pub mod web_viewer;
 

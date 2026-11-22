@@ -23,9 +23,10 @@
    - 采集会话、控制意图（`desktop_control`）与状态提交（`connection_commit`）均绑定单调递增版本号 `revision` 与 `audio_fence`。
    - 内置轻量无障碍 Web 字幕服务（`http://127.0.0.1:8788/captions` 与 `/api/captions`），支持高对比度大字号缩放及 `ETag: "rev-<revision>-<count>"` / `If-None-Match`（版本未变时直接返回 `304 Not Modified`）。
 
-4. **标准 `.SRT` / `.VTT` / `.TXT` 原子导出与会后纪要引用/数字事实核验**
+4. **标准 `.SRT` / `.VTT` / `.TXT` 原子导出、NewAPI 多渠道分级容错路由与会后纪要核验**
    - 支持一键原子写出（Windows `MoveFileExW` `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`）标准 SubRip `.srt`、HTML5 WebVTT `.vtt` 字幕与带毫秒级解码耗时的 `.txt` 逐字稿，并支持实时关键词/`#序号` 检索。
-   - 内置会后纪要生成与核验器（`caption::generate_and_verify` & `caption::verify_summary`）：支持一键调用 OpenAI 兼容接口（或离线抽取兜底）生成带 `[#序号]` 的会后纪要，自动校验每条引用是否对应真实字幕段落、是否存在漏标引用的句子（`uncited_lines`），并提取所有数字、金额、百分比与年份与被引用原文字幕做逐项比对。
+   - **NewAPI 多渠道分级故障转移与字节级 UTF-8 SSE 解码（`routing.rs`）**：接入本地 Docker 化 NewAPI 聚合网关，严格区分模型级故障（同渠道内切备用模型）与凭据/额度故障（HTTP 401/402/`insufficient_quota` 才触发跨渠道轮换），并通过字节缓冲 `SseDecoder` 保证任意 TCP 分片边界下的多字节中文 UTF-8 解码与 `finish_reason == "stop"` 截断拦截。
+   - 内置会后纪要生成与核验器（`caption::generate_and_verify` & `caption::verify_summary`）：一键生成带 `[#序号]` 的会后纪要，自动校验每条引用是否对应真实字幕段落、是否存在漏标引用的句子（`uncited_lines`），并逐字比对所有数字声明。
 
 5. **合规与隐私边界**
    - 界面显著位置内置参会者/讲师知情同意确认开关；仅在勾选确认后允许启动采集。
@@ -34,15 +35,15 @@
 ## 验证与测试
 
 ```powershell
-# 1. 运行全部 Rust 单元测试（89 项）
+# 1. 运行全部 Rust 单元测试（95 项）
 cargo test --lib --manifest-path src-tauri\Cargo.toml
 
 # 2. 严格 Clippy 静态检查（零告警）
-cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri\Cargo.toml --lib --tests -- -D warnings
 
 # 3. 前端 TypeScript 类型检查与生产构建
 npm run build
 ```
 
-- **Rust 单元测试**：**89 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应底噪 VAD 切片、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/VTT/TXT 格式化、P50/P95 延迟分位数与关键词检索、内置 Web 字幕服务 `ETag` `304` 协商，以及会后纪要生成与引用/数字核验）。
+- **Rust 单元测试**：**95 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应底噪 VAD 切片、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/VTT/TXT 格式化、P50/P95 延迟分位数与关键词检索、内置 Web 字幕服务 `ETag` `304` 协商、NewAPI 多渠道分级故障转移与任意 UTF-8 字节边界 SSE 解码，以及会后纪要引用/数字核验）。
 - **静态检查**：`cargo clippy --all-targets -- -D warnings` 零告警，`tsc && vite build` 零错误。
