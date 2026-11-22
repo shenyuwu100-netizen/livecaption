@@ -431,15 +431,14 @@ fn record_into_runtime(
     duration_ms: u64,
     decode_ms: u64,
     continued: bool,
-    capture_id: u128,
-    sequence: u64,
+    source_key: (u128, u64),
     end_ms: u64,
 ) -> Option<CaptionItem> {
     let trimmed = text.trim();
     if is_whisper_hallucination(trimmed) {
         return None;
     }
-    if !rt.seen.insert((capture_id, sequence)) {
+    if !rt.seen.insert(source_key) {
         return None;
     }
     let start_ms = end_ms.saturating_sub(duration_ms.max(600));
@@ -510,8 +509,7 @@ pub fn record(
         duration_ms,
         decode_ms,
         continued,
-        capture_id,
-        sequence,
+        (capture_id, sequence),
         now_ms(),
     ))
 }
@@ -783,8 +781,7 @@ mod tests {
             3200,
             250,
             true,
-            100,
-            1,
+            (100, 1),
             10_000,
         )
         .unwrap();
@@ -797,8 +794,7 @@ mod tests {
             2800,
             260,
             false,
-            100,
-            2,
+            (100, 2),
             13_500,
         )
         .unwrap();
