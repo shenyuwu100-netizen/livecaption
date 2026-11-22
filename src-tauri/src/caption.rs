@@ -60,6 +60,9 @@ pub struct SummaryVerification {
 pub struct GeneratedSummary {
     pub summary: String,
     pub mode: String,
+    pub gateway_name: Option<String>,
+    pub model_used: Option<String>,
+    pub attempts: usize,
     pub verification: SummaryVerification,
 }
 
@@ -295,63 +298,6 @@ pub fn retrieve_grounded_context(items: &[CaptionItem], query: &str, max_items: 
     selected.into_iter().take(max_items).collect()
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptComparison {
-    pub status: &'static str,
-    pub difference_kinds: Vec<&'static str>,
-}
-
-/// Compare two ASR transcripts (e.g. primary vs. secondary/re-decoded) and classify
-/// whether any discrepancy touches critical numbers, technical identifiers, or wording.
-pub fn compare_transcripts(primary: &str, secondary: &str) -> TranscriptComparison {
-    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let a = norm(primary);
-    let b = norm(secondary);
-    if a.is_empty() || b.is_empty() {
-        return TranscriptComparison {
-            status: "unavailable",
-            difference_kinds: Vec::new(),
-        };
-    }
-    if a == b {
-        return TranscriptComparison {
-            status: "similar",
-            difference_kinds: Vec::new(),
-        };
-    }
-    let num_re = Regex::new(r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)%?").expect("valid number regex");
-    let id_re = Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("valid identifier regex");
-
-    let nums = |s: &str| {
-        num_re
-            .find_iter(s)
-            .map(|m| m.as_str().to_string())
-            .collect::<Vec<_>>()
-    };
-    let ids = |s: &str| {
-        id_re
-            .find_iter(s)
-            .map(|m| m.as_str().to_string())
-            .collect::<Vec<_>>()
-    };
-
-    let mut kinds = Vec::new();
-    if nums(&a) != nums(&b) {
-        kinds.push("number");
-    }
-    if ids(&a) != ids(&b) {
-        kinds.push("identifier");
-    }
-    kinds.push("wording");
-    TranscriptComparison {
-        status: "different",
-        difference_kinds: kinds,
-    }
-}
-
-/// Verify that every `[#id]` citation in a post-meeting summary points to a real
-/// caption segment and that every numeric claim appears verbatim in the cited segments.
 pub fn verify_summary(summary: &str, items: &[CaptionItem]) -> SummaryVerification {
     let cite_re = Regex::new(r"\[#(\d+)\]").expect("valid citation regex");
     let num_re = Regex::new(
@@ -479,28 +425,53 @@ pub fn clear_items(state: &AppState) -> PublicStatus {
     snapshot_from(&rt)
 }
 
-pub fn record(
-    state: &AppState,
+fn record_into_runtime(
+    rt: &mut Runtime,
     text: &str,
     duration_ms: u64,
     decode_ms: u64,
     continued: bool,
     capture_id: u128,
     sequence: u64,
-) -> Result<Option<CaptionItem>, String> {
+    end_ms: u64,
+) -> Option<CaptionItem> {
     let trimmed = text.trim();
     if is_whisper_hallucination(trimmed) {
-        return Ok(None);
+        return None;
     }
-    let mut rt = state.caption.lock().map_err(|_| "字幕状态锁异常")?;
     if !rt.seen.insert((capture_id, sequence)) {
-        return Ok(None);
+        return None;
     }
-    let end_ms = now_ms();
     let start_ms = end_ms.saturating_sub(duration_ms.max(600));
     if rt.session_started_ms == 0 {
         rt.session_started_ms = start_ms;
     }
+
+    // If the previous segment was split mid-utterance at a 8-10s VAD word boundary (`continued == true`),
+    // deduplicate overlapping boundary characters and merge into the same caption item.
+    if let Some(prev) = rt.items.last_mut() {
+        if prev.continued && end_ms.saturating_sub(prev.end_ms) <= 15_000 {
+            prev.text = merge_continued_text(&prev.text, trimmed);
+            prev.end_ms = end_ms.max(prev.end_ms);
+            prev.timestamp = format_wall_timestamp(prev.end_ms);
+            prev.decode_ms = prev.decode_ms.saturating_add(decode_ms);
+            prev.continued = continued;
+            let merged = prev.clone();
+            if let Some(file) = rt.file.as_mut() {
+                if let Ok(line) = serde_json::to_string(&merged) {
+                    let _ = writeln!(file, "{line}");
+                }
+            }
+            rt.total_decode_ms = rt.total_decode_ms.saturating_add(decode_ms);
+            rt.last_decode_ms = decode_ms;
+            rt.message = format!(
+                "已合并续段字幕 #{}（本段识别耗时 {decode_ms} ms）",
+                merged.id
+            );
+            return Some(merged);
+        }
+    }
+
     let id = rt.items.len() as u64 + 1;
     let item = CaptionItem {
         id,
@@ -520,7 +491,29 @@ pub fn record(
     rt.last_decode_ms = decode_ms;
     rt.message = format!("最新字幕 #{id}（本地识别耗时 {decode_ms} ms）");
     rt.items.push(item.clone());
-    Ok(Some(item))
+    Some(item)
+}
+
+pub fn record(
+    state: &AppState,
+    text: &str,
+    duration_ms: u64,
+    decode_ms: u64,
+    continued: bool,
+    capture_id: u128,
+    sequence: u64,
+) -> Result<Option<CaptionItem>, String> {
+    let mut rt = state.caption.lock().map_err(|_| "字幕状态锁异常")?;
+    Ok(record_into_runtime(
+        &mut rt,
+        text,
+        duration_ms,
+        decode_ms,
+        continued,
+        capture_id,
+        sequence,
+        now_ms(),
+    ))
 }
 
 pub fn note_gap(_app: &AppHandle, state: &AppState, reason: &str) -> Result<PublicStatus, String> {
@@ -567,6 +560,7 @@ pub fn export_to_path(state: &AppState, path: &str, format: &str) -> Result<Stri
 pub async fn generate_and_verify(
     client: &reqwest::Client,
     items: &[CaptionItem],
+    saved_routes: &[super::routing::ImportedRoute],
     base_url: Option<&str>,
     api_key: Option<&str>,
     model: Option<&str>,
@@ -574,48 +568,69 @@ pub async fn generate_and_verify(
     if items.is_empty() {
         return Err("当前尚无字幕记录，无法生成会后纪要".into());
     }
+    let mut effective_routes: Vec<super::routing::ImportedRoute> = Vec::new();
     let clean_url = base_url.map(str::trim).unwrap_or("");
-    let (summary, mode) = if clean_url.is_empty() {
-        (local_extractive_summary(items), "local_extractive".to_string())
+    if !clean_url.is_empty() {
+        super::validate_base_url(clean_url)?;
+        effective_routes.push(super::routing::ImportedRoute {
+            config: super::routing::RouteConfig {
+                name: "manual-endpoint".into(),
+                base_url: clean_url.to_string(),
+            },
+            api_key: api_key.map(str::trim).unwrap_or("").to_string(),
+        });
+    }
+    for r in saved_routes {
+        if !effective_routes
+            .iter()
+            .any(|e| e.config.base_url == r.config.base_url && e.api_key == r.api_key)
+        {
+            effective_routes.push(r.clone());
+        }
+    }
+
+    let (summary, mode, gateway_name, model_used, attempts) = if effective_routes.is_empty() {
+        (
+            local_extractive_summary(items),
+            "local_extractive".to_string(),
+            None,
+            None,
+            0,
+        )
     } else {
-        let endpoint = super::chat_endpoint(clean_url)?;
         let messages = build_summary_messages(items);
-        let model_name = model
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-            .unwrap_or("gpt-4o-mini");
-        let mut req = client.post(endpoint).json(&serde_json::json!({
-            "model": model_name,
-            "messages": messages,
-            "temperature": 0.1
-        }));
-        if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
-            req = req.bearer_auth(key);
+        let mut models: Vec<String> = Vec::new();
+        if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            models.push(m.to_string());
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("调用纪要模型失败: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("纪要模型返回 HTTP {}", resp.status().as_u16()));
+        for fallback in super::routing::SUMMARY_MODELS {
+            if !models.iter().any(|m| m == fallback) {
+                models.push(fallback.to_string());
+            }
         }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("解析纪要响应失败: {e}"))?;
-        let text = super::extract_stream_text(&body)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if text.is_empty() {
-            return Err("纪要模型返回内容为空".into());
-        }
-        (text, "llm".to_string())
+        let outcome = super::routing::stream_chat_with_failover(
+            client,
+            &effective_routes,
+            &models,
+            &messages,
+            false,
+        )
+        .await?;
+        (
+            outcome.text,
+            "llm_stream".to_string(),
+            Some(outcome.gateway_name),
+            Some(outcome.model_used),
+            outcome.attempts,
+        )
     };
     let verification = verify_summary(&summary, items);
     Ok(GeneratedSummary {
         summary,
         mode,
+        gateway_name,
+        model_used,
+        attempts,
         verification,
     })
 }
@@ -702,10 +717,11 @@ mod tests {
     async fn local_extractive_fallback_produces_verified_cited_summary() {
         let items = sample_captions();
         let client = reqwest::Client::new();
-        let res = generate_and_verify(&client, &items, None, None, None)
+        let res = generate_and_verify(&client, &items, &[], None, None, None)
             .await
             .unwrap();
         assert_eq!(res.mode, "local_extractive");
+        assert_eq!(res.attempts, 0);
         assert!(res.verification.valid);
         assert_eq!(res.verification.cited_ids, vec![1, 2]);
     }
@@ -722,11 +738,15 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 4096];
             let _ = socket.read(&mut buf).await.unwrap();
-            let body = r#"{"choices":[{"message":{"content":"- 线上字幕覆盖率升至 96.4%，延迟 1780 ms [#1]\n- 下周完成 3 场讲座测试 [#2]"}}]}"#;
+            let sse = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"- 线上字幕覆盖率升至 96.4%，延迟 1780 ms [#1]\\n\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"- 下周完成 3 场讲座测试 [#2]\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            );
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse.len(),
+                sse
             );
             socket.write_all(resp.as_bytes()).await.unwrap();
         });
@@ -734,14 +754,59 @@ mod tests {
         let items = sample_captions();
         let client = reqwest::Client::new();
         let base_url = format!("http://{addr}/v1");
-        let res = generate_and_verify(&client, &items, Some(&base_url), Some("test-key"), Some("mock-model"))
-            .await
-            .unwrap();
+        let res = generate_and_verify(
+            &client,
+            &items,
+            &[],
+            Some(&base_url),
+            Some("test-key"),
+            Some("mock-model"),
+        )
+        .await
+        .unwrap();
         server.await.unwrap();
-        assert_eq!(res.mode, "llm");
+        assert_eq!(res.mode, "llm_stream");
+        assert_eq!(res.gateway_name.as_deref(), Some("manual-endpoint"));
+        assert_eq!(res.model_used.as_deref(), Some("mock-model"));
+        assert_eq!(res.attempts, 1);
         assert!(res.verification.valid);
         assert_eq!(res.verification.cited_ids, vec![1, 2]);
         assert!(res.verification.unsupported_numbers.is_empty());
+    }
+
+    #[test]
+    fn record_auto_merges_continued_segment_and_deduplicates_overlap() {
+        let mut rt = Runtime::default();
+        let first = record_into_runtime(
+            &mut rt,
+            "通过常驻推理进程避免重复",
+            3200,
+            250,
+            true,
+            100,
+            1,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(first.id, 1);
+        assert!(first.continued);
+
+        let merged = record_into_runtime(
+            &mut rt,
+            "避免重复加载模型从而降低延迟",
+            2800,
+            260,
+            false,
+            100,
+            2,
+            13_500,
+        )
+        .unwrap();
+        assert_eq!(merged.id, 1);
+        assert!(!merged.continued);
+        assert_eq!(merged.text, "通过常驻推理进程避免重复加载模型从而降低延迟");
+        assert_eq!(merged.decode_ms, 510);
+        assert_eq!(rt.items.len(), 1);
     }
 
     #[test]
@@ -808,19 +873,5 @@ mod tests {
         });
         let ctx = retrieve_grounded_context(&items, "3 场", 4);
         assert_eq!(ctx.iter().map(|i| i.id).collect::<Vec<_>>(), vec![2, 3]);
-    }
-
-    #[test]
-    fn transcript_comparator_detects_number_and_identifier_discrepancies() {
-        assert_eq!(
-            compare_transcripts("延迟 259 ms，使用 WASAPI", "延迟  259 ms，使用 WASAPI").status,
-            "similar"
-        );
-        let diff_num = compare_transcripts("覆盖率 96.4%，使用 WASAPI", "覆盖率 91.4%，使用 WASAPI");
-        assert_eq!(diff_num.status, "different");
-        assert_eq!(diff_num.difference_kinds, vec!["number", "wording"]);
-
-        let diff_id = compare_transcripts("调用 MoveFileExW 接口", "调用 ReplaceFileW 接口");
-        assert_eq!(diff_id.difference_kinds, vec!["identifier", "wording"]);
     }
 }

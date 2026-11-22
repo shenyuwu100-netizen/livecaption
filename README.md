@@ -19,14 +19,14 @@
      - 每次冷启动加载模型 + 首次推理：**2987.4 ms**（其中模型加载 2489.3 ms，首次推理 498.0 ms）；
      - 常驻进程预热后平均解码耗时（Warm Resident）：**259.6 ms**（248.3–265.5 ms，实时率 **RTF ≈ 0.029**，相比非驻留冷启动延迟降低 **91.3%**，提速 **11.5×**）；实时统计并展示 **P50 / P95** 解码延迟分位数。
 
-3. **单调版本栅栏（Monotonic Version Fencing）、6 秒租约心跳与内置跨端 Web 阅读页**
-   - 采集会话、控制意图（`desktop_control`）与状态提交（`connection_commit`）均绑定单调递增版本号 `revision` 与 `audio_fence`。
-   - 内置轻量无障碍 Web 字幕服务（`http://127.0.0.1:8788/captions` 与 `/api/captions`），支持高对比度大字号缩放及 `ETag: "rev-<revision>-<count>"` / `If-None-Match`（版本未变时直接返回 `304 Not Modified`）。
+3. **副屏 / 听障无障碍大字号字幕页与单调版本栅栏（`web_viewer.rs`）**
+   - 适合课堂投屏、会议副屏或听障参会者平板同步阅读：桌面端控制采集，副屏/平板打开 `http://127.0.0.1:8788/captions` 即可观看高对比度大字号字幕（支持 `A- / A+` 缩放）。
+   - 采集会话、控制意图（`desktop_control`）与状态提交（`connection_commit`）均绑定单调递增版本号 `revision`；`/api/captions` 原生支持 `ETag` / `If-None-Match`（无更新时直接返回 `304 Not Modified`）。
 
-4. **标准 `.SRT` / `.VTT` / `.TXT` 原子导出、NewAPI 多渠道分级容错路由与会后纪要核验**
-   - 支持一键原子写出（Windows `MoveFileExW` `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`）标准 SubRip `.srt`、HTML5 WebVTT `.vtt` 字幕与带毫秒级解码耗时的 `.txt` 逐字稿，并支持实时关键词/`#序号` 检索。
-   - **NewAPI 多渠道分级故障转移与字节级 UTF-8 SSE 解码（`routing.rs`）**：接入本地 Docker 化 NewAPI 聚合网关，严格区分模型级故障（同渠道内切备用模型）与凭据/额度故障（HTTP 401/402/`insufficient_quota` 才触发跨渠道轮换），并通过字节缓冲 `SseDecoder` 保证任意 TCP 分片边界下的多字节中文 UTF-8 解码与 `finish_reason == "stop"` 截断拦截。
-   - 内置会后纪要生成与核验器（`caption::generate_and_verify` & `caption::verify_summary`）：一键生成带 `[#序号]` 的会后纪要，自动校验每条引用是否对应真实字幕段落、是否存在漏标引用的句子（`uncited_lines`），并逐字比对所有数字声明。
+4. **标准 `.SRT` / `.VTT` / `.TXT` 原子导出、NewAPI 多渠道流式容错与会后纪要核验**
+   - 实时转写写入时自动过滤 Whisper 静音水印幻觉（`is_whisper_hallucination`），并在长句跨词边界切分（`continued == true`）时自动调用 `merge_continued_text` 消除首尾重复词合并；检索字幕时通过 `retrieve_grounded_context` 自动保留紧邻的“但/不保证/需核实”限定句。
+   - **NewAPI 多渠道分级故障转移与字节级 UTF-8 SSE 流式引擎（`routing::stream_chat_with_failover`）**：支持一键导入多条 NewAPI 网关配置（密钥仅驻留进程内存、不落盘），严格区分模型级错误（同渠道切备用模型）、凭据/额度故障（HTTP 401/402/`insufficient_quota` 才跨渠道轮换）与安全拒答（立即终止）；应用三阶段流式超时（TTFT 首字 + 流空闲 + 总期限，`: keepalive` 绝不重置计时器）与跨 TCP 分片 UTF-8 安全 `SseDecoder`。
+   - **会后纪要生成与确定性核验（`caption::generate_and_verify` & `verify_summary`）**：点击一键生成即通过上述流式容错引擎生成带 `[#序号]` 的要点纪要（未配置网关时走本地抽取兜底），随后自动校验引用存在性、漏标句（`uncited_lines`）与所有数字事实的原文一致性。
 
 5. **合规与隐私边界**
    - 界面显著位置内置参会者/讲师知情同意确认开关；仅在勾选确认后允许启动采集。
@@ -35,7 +35,7 @@
 ## 验证与测试
 
 ```powershell
-# 1. 运行全部 Rust 单元测试（100 项）
+# 1. 运行全部 Rust 单元测试（105 项）
 cargo test --lib --manifest-path src-tauri\Cargo.toml
 
 # 2. 严格 Clippy 静态检查（零告警）
@@ -45,5 +45,5 @@ cargo clippy --manifest-path src-tauri\Cargo.toml --lib --tests -- -D warnings
 npm run build
 ```
 
-- **Rust 单元测试**：**100 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应底噪 VAD 切片、Whisper 静音幻觉过滤与跨段重叠去重、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/VTT/TXT 格式化、P50/P95 延迟分位数与限定词同块检索、内置 Web 字幕服务 `ETag` `304` 协商、NewAPI 多渠道分级故障转移、三阶段流式超时预算与任意 UTF-8 字节边界 SSE 解码，以及会后纪要引用/数字核验）。
+- **Rust 单元测试**：**105 passed, 0 failed**（覆盖子进程管道生命周期、截断/超长帧拦截、静音心跳、自适应底噪 VAD 切片、Whisper 静音幻觉过滤与跨段自动重叠合并、单调版本号防乱序、6 秒租约心跳续约、原子文件替换、SRT/VTT/TXT 格式化、P50/P95 延迟分位数与限定词同块检索、副屏 Web 字幕服务 `ETag` `304` 协商、NewAPI 多渠道真实 TCP 流式故障转移/Keepalive 首字超时防假活/任意 UTF-8 字节边界 SSE 解码，以及会后纪要生成与引用/数字核验）。
 - **静态检查**：`cargo clippy --all-targets -- -D warnings` 零告警，`tsc && vite build` 零错误。

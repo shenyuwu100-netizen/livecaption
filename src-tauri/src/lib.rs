@@ -41,6 +41,7 @@ pub struct AppState {
     pub recognizer: Mutex<Option<asr::Engine>>,
     pub audio: Mutex<audio::Runtime>,
     pub sync: Mutex<sync::Runtime>,
+    pub routes: Mutex<Vec<routing::ImportedRoute>>,
     pub client: Client,
     pub settings: Mutex<LocalSettings>,
 }
@@ -49,7 +50,7 @@ impl AppState {
     pub fn new() -> Result<Self, String> {
         let client = Client::builder()
             .redirect(Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(60))
             .user_agent("LiveCaption/0.1.0")
             .build()
             .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
@@ -59,6 +60,7 @@ impl AppState {
             recognizer: Mutex::new(None),
             audio: Mutex::new(audio::Runtime::default()),
             sync: Mutex::new(sync::Runtime::default()),
+            routes: Mutex::new(Vec::new()),
             client,
             settings: Mutex::new(LocalSettings::default()),
         })
@@ -172,9 +174,31 @@ fn get_caption_status(state: State<'_, AppState>) -> caption::PublicStatus {
 fn get_captions(state: State<'_, AppState>, query: Option<String>) -> Vec<caption::CaptionItem> {
     let items = caption::list_items(&state);
     match query {
-        Some(q) if !q.trim().is_empty() => caption::search_captions(&items, &q),
+        Some(q) if !q.trim().is_empty() => {
+            caption::retrieve_grounded_context(&items, &q, items.len().max(1))
+        }
         _ => items,
     }
+}
+
+#[tauri::command]
+fn import_gateway_routes(
+    state: State<'_, AppState>,
+    raw_routes: String,
+) -> Result<Vec<routing::RouteConfig>, String> {
+    let parsed = routing::parse_routes(&raw_routes)?;
+    let public: Vec<routing::RouteConfig> = parsed.iter().map(|r| r.config.clone()).collect();
+    *state.routes.lock().map_err(|_| "网关路由锁异常")? = parsed;
+    Ok(public)
+}
+
+#[tauri::command]
+fn get_gateway_routes(state: State<'_, AppState>) -> Vec<routing::RouteConfig> {
+    state
+        .routes
+        .lock()
+        .map(|list| list.iter().map(|r| r.config.clone()).collect())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -208,10 +232,16 @@ async fn generate_meeting_summary(
     model: Option<String>,
 ) -> Result<caption::GeneratedSummary, String> {
     let items = caption::list_items(&state);
+    let saved_routes = state
+        .routes
+        .lock()
+        .map(|r| r.clone())
+        .unwrap_or_default();
     let client = state.client.clone();
     caption::generate_and_verify(
         &client,
         &items,
+        &saved_routes,
         base_url.as_deref(),
         api_key.as_deref(),
         model.as_deref(),
@@ -334,6 +364,8 @@ pub fn run() {
             get_captions,
             clear_captions,
             export_captions,
+            import_gateway_routes,
+            get_gateway_routes,
             verify_meeting_summary,
             generate_meeting_summary,
             hide_control,
